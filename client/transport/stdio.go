@@ -148,8 +148,7 @@ func (c *Stdio) Start(ctx context.Context) error {
 
 	ready := make(chan struct{})
 	go func() {
-		close(ready)
-		c.readResponses()
+		c.readResponses(ready)
 	}()
 	<-ready
 
@@ -259,8 +258,13 @@ func (c *Stdio) SetRequestHandler(handler RequestHandler) {
 // readResponses continuously reads and processes responses from the server's stdout.
 // It handles both responses to requests and notifications, routing them appropriately.
 // Runs until the done channel is closed or an error occurs reading from stdout.
-func (c *Stdio) readResponses() {
+func (c *Stdio) readResponses(ready chan struct{}) {
+	readySignaled := false
 	for {
+		if !readySignaled {
+			close(ready)
+			readySignaled = true
+		}
 		select {
 		case <-c.done:
 			return
