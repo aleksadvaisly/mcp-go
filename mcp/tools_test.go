@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestToolWithBothSchemasError verifies that there will be feedback if the
@@ -1848,6 +1849,41 @@ func TestToolOutputSchema_MarshalWithEmptyPropertiesAndRequired(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Contains(t, string(data), `"properties":{"query":"notEmpty=true"}`)
 	assert.Contains(t, string(data), `"required":["query"]`)
+}
+
+// TestToolWithNoParams_MarshalJSON_Issue690 verifies that a Tool created via NewTool without any parameters still produces valid JSON Schema with properties and required in inputSchema.
+func TestToolWithNoParams_MarshalJSON_Issue690(t *testing.T) {
+	tests := []struct {
+		name string
+		tool Tool
+	}{
+		{
+			name: "new tool without params includes empty properties and required",
+			tool: NewTool("hello_world", WithDescription("Say hello to someone")),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.tool)
+			require.NoError(t, err)
+
+			var parsed map[string]any
+			require.NoError(t, json.Unmarshal(data, &parsed))
+
+			inputSchema, ok := parsed["inputSchema"].(map[string]any)
+			require.True(t, ok, "inputSchema should be an object")
+			assert.Equal(t, "object", inputSchema["type"])
+
+			props, ok := inputSchema["properties"].(map[string]any)
+			require.True(t, ok, "properties should be present as an object, not null or absent")
+			assert.Empty(t, props)
+
+			req, ok := inputSchema["required"].([]any)
+			require.True(t, ok, "required should be present as an array, not null or absent")
+			assert.Empty(t, req)
+		})
+	}
 }
 
 // TestToolExecutionMarshaling tests that the Execution field is properly marshaled in JSON output

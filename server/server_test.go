@@ -2020,6 +2020,81 @@ func TestMCPServer_WithHooks(t *testing.T) {
 	)
 }
 
+// TestMCPServer_GetHooks verifies GetHooks returns nil when no hooks are
+// configured and returns the same pointer passed to WithHooks when set.
+func TestMCPServer_GetHooks(t *testing.T) {
+	hooks := &Hooks{}
+	hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {})
+
+	tests := []struct {
+		name      string
+		server    *MCPServer
+		wantHooks *Hooks
+		wantLen   int
+	}{
+		{
+			name:      "no hooks configured returns nil",
+			server:    NewMCPServer("test", "1.0.0"),
+			wantHooks: nil,
+			wantLen:   0,
+		},
+		{
+			name:      "with hooks configured returns same pointer",
+			server:    NewMCPServer("test", "1.0.0", WithHooks(hooks)),
+			wantHooks: hooks,
+			wantLen:   1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.server.GetHooks()
+			if tc.wantHooks == nil {
+				assert.Nil(t, got)
+				return
+			}
+			require.Same(t, tc.wantHooks, got)
+			assert.Len(t, got.OnBeforeAny, tc.wantLen)
+		})
+	}
+}
+
+// TestMCPServer_GetHooks_Composable verifies that third-party libraries can
+// append hooks via GetHooks without replacing existing registrations, and that
+// all composed hooks execute in registration order.
+func TestMCPServer_GetHooks_Composable(t *testing.T) {
+	hooks := &Hooks{}
+	var callOrder []string
+
+	hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+		callOrder = append(callOrder, "original")
+	})
+
+	s := NewMCPServer("test", "1.0.0", WithHooks(hooks))
+
+	// Simulate a third-party library getting hooks and appending
+	existing := s.GetHooks()
+	existing.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+		callOrder = append(callOrder, "third-party")
+	})
+
+	assert.Len(t, existing.OnBeforeAny, 2)
+
+	// Trigger hooks via a ping request
+	_ = s.HandleMessage(context.Background(), []byte(`{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "initialize"
+	}`))
+	_ = s.HandleMessage(context.Background(), []byte(`{
+		"jsonrpc": "2.0",
+		"id": 2,
+		"method": "ping"
+	}`))
+
+	assert.Equal(t, []string{"original", "third-party", "original", "third-party"}, callOrder)
+}
+
 func TestMCPServer_SessionHooks(t *testing.T) {
 	var (
 		registerCalled   bool

@@ -275,17 +275,14 @@ func (c *StreamableHTTP) SendRequest(
 	resp, err := c.sendHTTP(ctx, http.MethodPost, bytes.NewReader(requestBody), "application/json, text/event-stream", request.Header)
 	if err != nil {
 		if errors.Is(err, ErrSessionTerminated) && request.Method == string(mcp.MethodInitialize) {
-			// If the request is initialize, should not return a SessionTerminated error
-			// It should be a genuine endpoint-routing issue.
-			// ( Fall through to return StatusCode checking. )
-		} else {
-			return nil, fmt.Errorf("failed to send request: %w", err)
+			// Per the MCP spec's backwards compatibility section: a 404 on an
+			// initialize POST means the server likely only supports legacy SSE.
+			return nil, ErrLegacySSEServer
 		}
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
 	// Only proceed if we have a valid response.
-	// When sendHTTP fails and resp is nil but method is mcp.MethodInitialize
-	// defer resp.Body.Close() fails with nil pointer dereference.
 	if resp == nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
@@ -302,6 +299,13 @@ func (c *StreamableHTTP) SendRequest(
 				}
 			}
 			return nil, ErrUnauthorized
+		}
+
+		// Per the MCP spec's backwards compatibility section: if an initialize
+		// POST receives an HTTP 4xx (e.g. 405 Method Not Allowed, 404 Not Found),
+		// the server likely only supports the legacy HTTP+SSE transport.
+		if request.Method == string(mcp.MethodInitialize) && resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return nil, ErrLegacySSEServer
 		}
 
 		// handle error response
@@ -660,6 +664,7 @@ var (
 	ErrSessionTerminated   = fmt.Errorf("session terminated (404). need to re-initialize")
 	ErrGetMethodNotAllowed = fmt.Errorf("GET method not allowed")
 	ErrUnauthorized        = fmt.Errorf("unauthorized (401)")
+	ErrLegacySSEServer     = fmt.Errorf("server returned 4xx for initialize POST, likely a legacy SSE server")
 
 	retryInterval = 1 * time.Second // a variable is convenient for testing
 )

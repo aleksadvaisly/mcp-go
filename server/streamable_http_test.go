@@ -2612,3 +2612,144 @@ func TestStreamableHTTP_DrainNotifications(t *testing.T) {
 		_ = drainLoopCalled
 	})
 }
+
+func TestStreamableHTTP_SessionIdleTTLSweeper(t *testing.T) {
+	t.Run("expired sessions are swept", func(t *testing.T) {
+		mcpServer := NewMCPServer("test", "1.0")
+		httpServer := NewStreamableHTTPServer(mcpServer,
+			WithStateful(true),
+			WithSessionIdleTTL(100*time.Millisecond),
+		)
+		defer func() { _ = httpServer.Shutdown(context.Background()) }()
+		ts := httptest.NewServer(httpServer)
+		defer ts.Close()
+
+		// Initialize a session
+		resp, err := postJSON(ts.URL, initRequest)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		sessionID := resp.Header.Get(HeaderKeySessionID)
+		require.NotEmpty(t, sessionID)
+
+		// Verify the session has transport state
+		_, hasActivity := httpServer.sessionLastActive.Load(sessionID)
+		assert.True(t, hasActivity, "session should be tracked after initialize")
+
+		// Populate sessionTools so we can verify cleanup is not vacuously true
+		httpServer.sessionTools.set(sessionID, map[string]ServerTool{"test": {}})
+
+		// Wait for the sweeper to clean the expired session
+		assert.Eventually(t, func() bool {
+			_, exists := httpServer.sessionLastActive.Load(sessionID)
+			return !exists
+		}, 2*time.Second, 50*time.Millisecond, "session should be swept after idle TTL")
+
+		// Verify per-session transport state is cleaned
+		_, hasActiveSession := httpServer.activeSessions.Load(sessionID)
+		assert.False(t, hasActiveSession, "activeSessions should be cleaned")
+		tools := httpServer.sessionTools.get(sessionID)
+		assert.Empty(t, tools, "sessionTools should be cleaned")
+	})
+
+	t.Run("active sessions are not swept", func(t *testing.T) {
+		mcpServer := NewMCPServer("test", "1.0")
+		httpServer := NewStreamableHTTPServer(mcpServer,
+			WithStateful(true),
+			WithSessionIdleTTL(200*time.Millisecond),
+		)
+		defer func() { _ = httpServer.Shutdown(context.Background()) }()
+		ts := httptest.NewServer(httpServer)
+		defer ts.Close()
+
+		// Initialize a session
+		resp, err := postJSON(ts.URL, initRequest)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		sessionID := resp.Header.Get(HeaderKeySessionID)
+		require.NotEmpty(t, sessionID)
+
+		// TTL=200ms → sweep interval = max(100ms, 1s) = 1s.
+		// Ping for 2s so at least one sweep fires while the session is still active.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(80 * time.Millisecond)
+			pingResp, pingErr := postSessionJSON(ts.URL, sessionID, map[string]any{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"method":  "ping",
+				"params":  map[string]any{},
+			})
+			require.NoError(t, pingErr)
+			pingResp.Body.Close()
+		}
+
+		// Session should still be tracked — the sweeper fired but the session
+		// was touched within TTL each time.
+		_, hasActivity := httpServer.sessionLastActive.Load(sessionID)
+		assert.True(t, hasActivity, "active session should not be swept")
+	})
+
+	t.Run("disabled sweeper does not clean sessions", func(t *testing.T) {
+		mcpServer := NewMCPServer("test", "1.0")
+		httpServer := NewStreamableHTTPServer(mcpServer,
+			WithStateful(true),
+			// No WithSessionIdleTTL — sweeper disabled
+		)
+		defer func() { _ = httpServer.Shutdown(context.Background()) }()
+		ts := httptest.NewServer(httpServer)
+		defer ts.Close()
+
+		// Initialize a session
+		resp, err := postJSON(ts.URL, initRequest)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		sessionID := resp.Header.Get(HeaderKeySessionID)
+		require.NotEmpty(t, sessionID)
+
+		// sessionLastActive should NOT be populated when sweeper is disabled
+		_, hasActivity := httpServer.sessionLastActive.Load(sessionID)
+		assert.False(t, hasActivity, "touchSession should be a no-op when sweeper is disabled")
+
+		// Session should still be in activeSessions (not cleaned)
+		time.Sleep(200 * time.Millisecond)
+		_, hasActiveSession := httpServer.activeSessions.Load(sessionID)
+		assert.True(t, hasActiveSession, "session should remain in activeSessions")
+	})
+
+	t.Run("DELETE still cleans session when sweeper is enabled", func(t *testing.T) {
+		mcpServer := NewMCPServer("test", "1.0")
+		httpServer := NewStreamableHTTPServer(mcpServer,
+			WithStateful(true),
+			WithSessionIdleTTL(10*time.Second), // long TTL so sweeper won't fire
+		)
+		defer func() { _ = httpServer.Shutdown(context.Background()) }()
+		ts := httptest.NewServer(httpServer)
+		defer ts.Close()
+
+		// Initialize a session
+		resp, err := postJSON(ts.URL, initRequest)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		sessionID := resp.Header.Get(HeaderKeySessionID)
+		require.NotEmpty(t, sessionID)
+
+		// Send DELETE
+		req, err := http.NewRequest(http.MethodDelete, ts.URL, nil)
+		require.NoError(t, err)
+		req.Header.Set(HeaderKeySessionID, sessionID)
+		delResp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		delResp.Body.Close()
+		require.Equal(t, http.StatusOK, delResp.StatusCode)
+
+		// Verify all state is cleaned immediately
+		_, hasActivity := httpServer.sessionLastActive.Load(sessionID)
+		assert.False(t, hasActivity, "sessionLastActive should be cleaned after DELETE")
+		_, hasActiveSession := httpServer.activeSessions.Load(sessionID)
+		assert.False(t, hasActiveSession, "activeSessions should be cleaned after DELETE")
+	})
+}
