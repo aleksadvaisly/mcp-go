@@ -652,6 +652,30 @@ Key examples include:
 
 MCP-Go supports stdio, SSE and streamable-HTTP transport layers. For SSE transport, you can use `SetConnectionLostHandler()` to detect and handle disconnections for implementing reconnection logic.
 
+### Stdio Lifecycle Management
+
+Stdio servers include built-in protection against process leaks. When a client (e.g. an AI coding agent) launches an MCP server via stdio but fails to clean up on exit, the server process can hang indefinitely. Two mechanisms prevent this:
+
+**Idle Timeout** (default: 1 hour) -- shuts down the server after a period of inactivity. The timer resets on every incoming message and will not fire while tool calls are in-flight.
+
+**Parent Process Monitor** (default: enabled) -- polls the parent process ID every 5 seconds. If the parent changes (indicating the original launcher died and the process was reparented), the server shuts down gracefully.
+
+Both can be configured via `StdioOption`:
+
+```go
+// Use defaults: 1h idle timeout, parent monitor enabled
+server.ServeStdio(s)
+
+// Custom idle timeout
+server.ServeStdio(s, server.WithIdleTimeout(30*time.Minute))
+
+// Disable idle timeout
+server.ServeStdio(s, server.WithIdleTimeout(0))
+
+// Disable parent monitor
+server.ServeStdio(s, server.WithParentProcessMonitor(false))
+```
+
 ### Session Management
 
 MCP-Go provides a robust session management system that allows you to:

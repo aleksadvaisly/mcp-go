@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -36,6 +37,11 @@ type StdioServer struct {
 	workerPoolSize int
 	queueSize      int
 	writeMu        sync.Mutex // Protects concurrent writes
+
+	idleTimeout   time.Duration
+	parentMonitor bool
+	inflight      atomic.Int64
+	idleTimer     *time.Timer
 }
 
 // toolCallWork represents a queued tool call request
@@ -87,6 +93,18 @@ func WithQueueSize(size int) StdioOption {
 			s.errLogger.Printf("Queue size %d exceeds maximum (%d), using maximum", size, maxQueueSize)
 			s.queueSize = maxQueueSize
 		}
+	}
+}
+
+func WithIdleTimeout(d time.Duration) StdioOption {
+	return func(s *StdioServer) {
+		s.idleTimeout = d
+	}
+}
+
+func WithParentProcessMonitor(enabled bool) StdioOption {
+	return func(s *StdioServer) {
+		s.parentMonitor = enabled
 	}
 }
 
@@ -402,6 +420,8 @@ func NewStdioServer(server *MCPServer) *StdioServer {
 		), // Default to discarding logs
 		workerPoolSize: 5,   // Default worker pool size
 		queueSize:      100, // Default queue size
+		idleTimeout:    time.Hour,
+		parentMonitor:  true,
 	}
 }
 
@@ -473,11 +493,10 @@ func (s *StdioServer) toolCallWorker(ctx context.Context) {
 		select {
 		case work, ok := <-s.toolCallQueue:
 			if !ok {
-				// Channel closed, exit worker
 				return
 			}
-			// Process the tool call
 			response := s.server.HandleMessage(work.ctx, work.message)
+			s.inflight.Add(-1)
 			if response != nil {
 				if err := s.writeResponse(response, work.writer); err != nil {
 					s.errLogger.Printf("Error writing tool response: %v", err)
@@ -523,6 +542,9 @@ func (s *StdioServer) Listen(
 	stdin io.Reader,
 	stdout io.Writer,
 ) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Initialize the tool call queue
 	s.toolCallQueue = make(chan *toolCallWork, s.queueSize)
 
@@ -549,6 +571,15 @@ func (s *StdioServer) Listen(
 		go s.toolCallWorker(ctx)
 	}
 
+	if s.idleTimeout > 0 {
+		s.idleTimer = time.NewTimer(s.idleTimeout)
+		go s.runIdleMonitor(ctx, cancel)
+	}
+
+	if s.parentMonitor {
+		go s.runParentMonitor(ctx, cancel)
+	}
+
 	// Start notification handler
 	go s.handleNotifications(ctx, stdout)
 
@@ -570,10 +601,11 @@ func (s *StdioServer) processMessage(
 	line string,
 	writer io.Writer,
 ) error {
-	// If line is empty, likely due to ctx cancellation
 	if len(line) == 0 {
 		return nil
 	}
+
+	s.resetIdleTimer()
 
 	// Parse the message as raw JSON
 	var rawMessage json.RawMessage
@@ -602,7 +634,7 @@ func (s *StdioServer) processMessage(
 		Method string `json:"method"`
 	}
 	if json.Unmarshal(rawMessage, &baseMessage) == nil && baseMessage.Method == "tools/call" {
-		// Queue tool calls for processing by workers
+		s.inflight.Add(1)
 		select {
 		case s.toolCallQueue <- &toolCallWork{
 			ctx:     ctx,
@@ -611,10 +643,11 @@ func (s *StdioServer) processMessage(
 		}:
 			return nil
 		case <-ctx.Done():
+			s.inflight.Add(-1)
 			return ctx.Err()
 		default:
-			// Queue is full, process synchronously as fallback
 			s.errLogger.Printf("Tool call queue full, processing synchronously")
+			defer s.inflight.Add(-1)
 			response := s.server.HandleMessage(ctx, rawMessage)
 			if response != nil {
 				return s.writeResponse(response, writer)
@@ -849,6 +882,50 @@ func (s *StdioServer) writeResponse(
 	}
 
 	return nil
+}
+
+func (s *StdioServer) runIdleMonitor(ctx context.Context, cancel context.CancelFunc) {
+	for {
+		select {
+		case <-s.idleTimer.C:
+			if s.inflight.Load() > 0 {
+				s.idleTimer.Reset(s.idleTimeout)
+				continue
+			}
+			s.errLogger.Printf("Shutting down: idle timeout (%v) exceeded with no in-flight requests", s.idleTimeout)
+			cancel()
+			return
+		case <-ctx.Done():
+			s.idleTimer.Stop()
+			return
+		}
+	}
+}
+
+func (s *StdioServer) resetIdleTimer() {
+	if s.idleTimer != nil {
+		s.idleTimer.Reset(s.idleTimeout)
+	}
+}
+
+func (s *StdioServer) runParentMonitor(ctx context.Context, cancel context.CancelFunc) {
+	initialPPID := os.Getppid()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			currentPPID := os.Getppid()
+			if currentPPID != initialPPID {
+				s.errLogger.Printf("Shutting down: parent process changed (was %d, now %d)", initialPPID, currentPPID)
+				cancel()
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // ServeStdio is a convenience function that creates and starts a StdioServer with os.Stdin and os.Stdout.
