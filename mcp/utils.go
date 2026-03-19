@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"github.com/spf13/cast"
 )
@@ -281,6 +282,8 @@ func NewToolResultText(text string) *CallToolResult {
 
 // NewToolResultJSON creates a new CallToolResult with a JSON content.
 func NewToolResultJSON[T any](data T) (*CallToolResult, error) {
+	structured := ensureStructuredObject(data)
+
 	b, err := json.Marshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("unable to marshal JSON: %w", err)
@@ -293,8 +296,27 @@ func NewToolResultJSON[T any](data T) (*CallToolResult, error) {
 				Text: string(b),
 			},
 		},
-		StructuredContent: data,
+		StructuredContent: structured,
 	}, nil
+}
+
+// ensureStructuredObject wraps slices and arrays in a {"items": ...} object
+// because the MCP protocol requires structuredContent to be a JSON object.
+func ensureStructuredObject(data any) any {
+	if data == nil {
+		return data
+	}
+	v := reflect.ValueOf(data)
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return data
+		}
+		v = v.Elem()
+	}
+	if v.Kind() == reflect.Slice || v.Kind() == reflect.Array {
+		return map[string]any{"items": data}
+	}
+	return data
 }
 
 // NewToolResultStructured creates a new CallToolResult with structured content.
@@ -307,7 +329,7 @@ func NewToolResultStructured(structured any, fallbackText string) *CallToolResul
 				Text: fallbackText,
 			},
 		},
-		StructuredContent: structured,
+		StructuredContent: ensureStructuredObject(structured),
 	}
 }
 

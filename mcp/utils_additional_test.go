@@ -559,14 +559,51 @@ func TestToBoolPtr(t *testing.T) {
 // Test NewToolResultJSON with error
 
 func TestNewToolResultJSON_Error(t *testing.T) {
-	// Create a type that can't be marshaled
 	type BadType struct {
-		Func func() // functions can't be marshaled
+		Func func()
 	}
 
 	_, err := NewToolResultJSON(BadType{Func: func() {}})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unable to marshal JSON")
+}
+
+func TestNewToolResultJSON_SliceWrappedAsObject(t *testing.T) {
+	type item struct {
+		Name string `json:"name"`
+	}
+	items := []item{{Name: "a"}, {Name: "b"}}
+
+	result, err := NewToolResultJSON(items)
+	require.NoError(t, err)
+
+	sc, ok := result.StructuredContent.(map[string]any)
+	require.True(t, ok, "structuredContent must be a map, got %T", result.StructuredContent)
+	assert.Contains(t, sc, "items")
+	wrapped, ok := sc["items"].([]item)
+	require.True(t, ok)
+	assert.Len(t, wrapped, 2)
+}
+
+func TestNewToolResultJSON_MapPassedThrough(t *testing.T) {
+	data := map[string]any{"count": 3, "values": []string{"x"}}
+
+	result, err := NewToolResultJSON(data)
+	require.NoError(t, err)
+
+	sc, ok := result.StructuredContent.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, 3, sc["count"])
+}
+
+func TestNewToolResultStructured_SliceWrappedAsObject(t *testing.T) {
+	items := []string{"a", "b"}
+
+	result := NewToolResultStructured(items, "fallback")
+
+	sc, ok := result.StructuredContent.(map[string]any)
+	require.True(t, ok, "structuredContent must be a map, got %T", result.StructuredContent)
+	assert.Contains(t, sc, "items")
 }
 
 // Test FormatNumberResult
