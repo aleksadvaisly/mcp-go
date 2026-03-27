@@ -420,7 +420,7 @@ func NewStdioServer(server *MCPServer) *StdioServer {
 		), // Default to discarding logs
 		workerPoolSize: 5,   // Default worker pool size
 		queueSize:      100, // Default queue size
-		idleTimeout:    time.Hour,
+		idleTimeout:    0,
 		parentMonitor:  true,
 	}
 }
