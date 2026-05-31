@@ -353,7 +353,7 @@ func NewToolResultStructuredOnly(structured any) *CallToolResult {
 				Text: fallbackText,
 			},
 		},
-		StructuredContent: structured,
+		StructuredContent: ensureStructuredObject(structured),
 	}
 }
 
