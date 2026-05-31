@@ -495,7 +495,19 @@ func (s *StdioServer) toolCallWorker(ctx context.Context) {
 			if !ok {
 				return
 			}
-			response := s.server.HandleMessage(work.ctx, work.message)
+			// Process the tool call with panic recovery so a single
+			// panicking handler does not kill the worker permanently and
+			// shrink the pool. The worker recovers, returns an
+			// INTERNAL_ERROR response and continues processing.
+			response := func() (resp mcp.JSONRPCMessage) {
+				defer func() {
+					if r := recover(); r != nil {
+						s.errLogger.Printf("panic recovered in stdio tool call worker: %v", r)
+						resp = createErrorResponse(nil, mcp.INTERNAL_ERROR, fmt.Sprintf("internal panic: %v", r))
+					}
+				}()
+				return s.server.HandleMessage(work.ctx, work.message)
+			}()
 			s.inflight.Add(-1)
 			if response != nil {
 				if err := s.writeResponse(response, work.writer); err != nil {

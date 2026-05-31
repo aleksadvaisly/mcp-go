@@ -1621,6 +1621,14 @@ func (s *MCPServer) executeTaskTool(
 	taskTool ServerTaskTool,
 	request mcp.CallToolRequest,
 ) {
+	// Recover from a panicking task handler so it marks the task failed
+	// instead of crashing the whole process.
+	defer func() {
+		if r := recover(); r != nil {
+			s.completeTask(entry, nil, fmt.Errorf("panic in task tool handler %s: %v", request.Params.Name, r))
+		}
+	}()
+
 	// Create cancellable context for this task execution
 	taskCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -2282,13 +2290,13 @@ func (s *MCPServer) scheduleTaskCleanup(taskID string, ttlMs int64) {
 	s.expiredTasks[taskID] = time.Now()
 	s.tasksMu.Unlock()
 
-	// Clean up the tombstone after 5 minutes
-	go func() {
-		time.Sleep(5 * time.Minute)
+	// Remove the tombstone after 5 minutes. time.AfterFunc avoids a
+	// persistent goroutine that sleeps with no cancellation signal.
+	time.AfterFunc(5*time.Minute, func() {
 		s.tasksMu.Lock()
 		delete(s.expiredTasks, taskID)
 		s.tasksMu.Unlock()
-	}()
+	})
 }
 
 // sendTaskStatusNotification sends a notification when a task's status changes.
